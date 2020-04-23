@@ -14,6 +14,7 @@ defmodule SevenottersElasticsearch.Storage do
   @spec start_link(keyword) :: :ignore | {:error, any} | {:ok, pid}
   def start_link(opts \\ []) do
     url = Keyword.get(opts, :url) || raise "missing elastic url"
+
     port =
       case Keyword.get(opts, :port) do
         nil -> nil
@@ -52,10 +53,20 @@ defmodule SevenottersElasticsearch.Storage do
   def is_valid_id?(id) when is_bitstring(id), do: Regex.match?(@id_regex, id)
 
   @spec max_in_collection(String.t(), atom) :: Int.t()
-  def max_in_collection(collection, field), do: GenServer.call(__MODULE__, {:max_in_collection, [collection, field]})
+  def max_in_collection(collection, field),
+    do: GenServer.call(__MODULE__, {:max_in_collection, [collection, field]})
 
-  @spec content_of(String.t(), Map.t(), Map.t()) :: List.t()
-  def content_of(collection, filter, sort), do: GenServer.call(__MODULE__, {:content_of, [collection, filter, sort]})
+  @spec content(String.t()) :: List.t()
+  def content(collection), do: GenServer.call(__MODULE__, {:content, collection})
+
+  @spec content_by_correlation_id(String.t(), String.t(), atom()) :: List.t()
+  def content_by_correlation_id(collection, correlation_id, sort),
+    do:
+      GenServer.call(__MODULE__, {:content_by_correlation_id, [collection, correlation_id, sort]})
+
+  @spec content_by_types(String.t(), [String.t()], atom()) :: List.t()
+  def content_by_types(collection, types, sort),
+    do: GenServer.call(__MODULE__, {:content_by_types, [collection, types, sort]})
 
   @spec drop_collections(List.t()) :: any
   def drop_collections(collections) do
@@ -65,32 +76,60 @@ defmodule SevenottersElasticsearch.Storage do
   @spec sort_expression() :: any
   def sort_expression(), do: :counter
 
-  @spec type_expression([String.t()]) :: any
-  def type_expression(types), do: %{type: types}
-
-  @spec correlation_id_expression(String.t()) :: any
-  def correlation_id_expression(correlation_id), do: %{correlation_id: correlation_id}
-
   #
   # Callback
   #
 
-  def handle_call({:content_of, [collection, %{type: _types} = filter, sort]}, _from, %{url: url} = state) do
-    sort_expression = [%{} |> Map.put(sort, "asc")]
-    {:ok, %{body: %{hits: %{hits: hits}}}} = Elastix.Search.search(url, collection, [@type_name], %{query: %{constant_score: %{filter: %{terms: filter}}}, sort: sort_expression})
+  def handle_call({:content, collection}, _from, %{url: url} = state) do
+    {:ok, %{body: %{hits: %{hits: hits}}}} =
+      Elastix.Search.search(url, collection, [@type_name], %{})
+
     hits = hits |> Enum.map(fn h -> Map.get(h, :_source) end)
     {:reply, hits, state}
   end
-  def handle_call({:content_of, [collection, %{correlation_id: _correlation_id} = filter, sort]}, _from, %{url: url} = state) do
+
+  def handle_call({:content_by_types, [collection, types, sort]}, _from, %{url: url} = state) do
     sort_expression = [%{} |> Map.put(sort, "asc")]
-    {:ok, %{body: %{hits: %{hits: hits}}}} = Elastix.Search.search(url, collection, [@type_name], %{query: %{constant_score: %{filter: %{term: filter}}}, sort: sort_expression})
+    filter = %{type: types}
+
+    {:ok, %{body: %{hits: %{hits: hits}}}} =
+      Elastix.Search.search(url, collection, [@type_name], %{
+        query: %{constant_score: %{filter: %{terms: filter}}},
+        sort: sort_expression
+      })
+
+    hits = hits |> Enum.map(fn h -> Map.get(h, :_source) end)
+    {:reply, hits, state}
+  end
+
+  def handle_call(
+        {:content_by_correlation_id, [collection, correlation_id, sort]},
+        _from,
+        %{url: url} = state
+      ) do
+    sort_expression = [%{} |> Map.put(sort, "asc")]
+    filter = %{correlation_id: correlation_id}
+
+    {:ok, %{body: %{hits: %{hits: hits}}}} =
+      Elastix.Search.search(url, collection, [@type_name], %{
+        query: %{constant_score: %{filter: %{term: filter}}},
+        sort: sort_expression
+      })
+
     hits = hits |> Enum.map(fn h -> Map.get(h, :_source) end)
     {:reply, hits, state}
   end
 
   def handle_call({:max_in_collection, [collection, field]}, _from, %{url: url} = state) do
     {:ok, %{body: %{aggregations: %{max_counter: %{value: value}}}}} =
-      Elastix.Search.search(url, collection, [@type_name], %{aggs: %{max_counter: %{max: %{field: field}}}}, [size: 0])
+      Elastix.Search.search(
+        url,
+        collection,
+        [@type_name],
+        %{aggs: %{max_counter: %{max: %{field: field}}}},
+        size: 0
+      )
+
     {:reply, read_max_value(value), state}
   end
 
@@ -100,10 +139,12 @@ defmodule SevenottersElasticsearch.Storage do
   end
 
   def handle_call({:drop_collections, collections}, _from, %{url: url} = state) do
-    collections |> Enum.each(fn collection ->
+    collections
+    |> Enum.each(fn collection ->
       Elastix.Index.exists?(url, collection) |> delete_index(url, collection)
       create_index(url, collection)
     end)
+
     {:reply, nil, state}
   end
 
@@ -120,18 +161,25 @@ defmodule SevenottersElasticsearch.Storage do
 
   defp create_index({:ok, false}, url, collection), do: create_index(url, collection)
   defp create_index({:ok, true}, _url, _collection), do: nil
+
   defp create_index(url, collection) do
     Logger.info("#{collection} will be created")
-    Elastix.Index.create(url, collection, %{mappings: %{properties: %{
-      counter: %{type: "long"},
-      correlation_id: %{type: "keyword"},
-      correlation_module: %{type: "keyword"},
-      type: %{type: "keyword"},
-    }}})
+
+    Elastix.Index.create(url, collection, %{
+      mappings: %{
+        properties: %{
+          counter: %{type: "long"},
+          correlation_id: %{type: "keyword"},
+          correlation_module: %{type: "keyword"},
+          type: %{type: "keyword"}
+        }
+      }
+    })
   end
 
   defp delete_index({:ok, true}, url, collection), do: delete_index(url, collection)
   defp delete_index({:ok, false}, _url, _collection), do: nil
+
   defp delete_index(url, collection) do
     Logger.info("#{collection} will be deleted")
     Elastix.Index.delete(url, collection)

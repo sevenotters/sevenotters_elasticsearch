@@ -4,7 +4,7 @@ defmodule SevenottersElasticsearch.MixProject do
   def project do
     [
       app: :sevenotters_elasticsearch,
-      version: "0.1.0",
+      version: "0.1.1",
       elixir: "~> 1.10",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -18,7 +18,6 @@ defmodule SevenottersElasticsearch.MixProject do
       # Package
       description: "MongoDB persistence support for Seven Otters.",
       package: package()
-
     ]
   end
 
