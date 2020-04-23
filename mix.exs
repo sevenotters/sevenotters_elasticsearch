@@ -51,7 +51,8 @@ defmodule SevenottersElasticsearch.MixProject do
       {:credo, "~> 1.1", only: :dev, runtime: false},
       {:elastix, "~> 0.8"},
       {:ex_doc, "~> 0.21", only: :dev, runtime: false},
-      {:sevenotters_persistence, "~> 0.1"}
+      {:sevenotters_persistence, "~> 0.1"},
+      {:uuid, "~> 1.1.8"}
     ]
   end
 end
